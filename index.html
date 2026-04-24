@@ -67,9 +67,11 @@
     }
 
     .toggle {
+      --segments: 2;
+      --pill-index: 0;
       position: relative;
       display: inline-grid;
-      grid-template-columns: repeat(2, 1fr);
+      grid-template-columns: repeat(var(--segments), 1fr);
       gap: 6px;
       padding: 6px;
       border-radius: 999px;
@@ -130,12 +132,13 @@
       position: absolute;
       top: 6px;
       left: 6px;
-      width: calc(50% - 6px);
+      width: calc((100% / var(--segments)) - 6px);
       height: calc(100% - 12px);
       border-radius: 999px;
       background: linear-gradient(120deg, var(--neon), var(--neon-2));
       box-shadow: 0 0 20px rgba(61, 215, 255, 0.55);
       transition: transform 240ms ease;
+      transform: translateX(calc(var(--pill-index) * 100%));
     }
 
     .content {
@@ -479,7 +482,7 @@
     const UPLOADED_CSV_TEXT_KEY = "censusDatawheel.uploadedCsvText";
     const UPLOADED_CSV_NAME_KEY = "censusDatawheel.uploadedCsvName";
 
-    const METRICS = [
+    const DEFAULT_METRICS = [
       { key: "Total population", label: "Population", type: "int" },
       { key: "Median age (years)", label: "Median Age", type: "float1" },
       { key: "Median household income (dollars)", label: "Median Income", type: "currency" },
@@ -487,6 +490,7 @@
       { key: "No health insurance coverage", label: "No Insurance", type: "percent" },
       { key: "65 years and over", label: "65+ Population", type: "percent" }
     ];
+    const POPULATION_METRIC_KEY = "Total population";
 
     const STATE_ABBR_MAP = {
       Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA",
@@ -556,7 +560,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     };
 
     const state = {
-      mode: "total",
+      mode: "total_population",
       selectedState: "Alabama",
       dataByState: {},
       states: [],
@@ -564,7 +568,16 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       hoveredState: null,
       view: "wheel",
       usGeoFeatures: null,
-      csvSourceLabel: "wheel data.csv (local)"
+      csvSourceLabel: "wheel data.csv (local)",
+      groups: [
+        { key: "total_population", label: "Total population" },
+        { key: "asian_alone", label: "Asian alone" }
+      ],
+      groupLabelByKey: {
+        total_population: "Total population",
+        asian_alone: "Asian alone"
+      },
+      metrics: DEFAULT_METRICS
     };
 
     function parseCSV(text) {
@@ -613,6 +626,43 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       return Number(txt);
     }
 
+    function toGroupKey(groupLabel) {
+      return groupLabel
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+    }
+
+    function inferMetricType(metricLabel, sampleRaw) {
+      const sample = String(sampleRaw || "");
+      if (/\$/.test(sample) || /dollars?/i.test(metricLabel)) return "currency";
+      if (/%/.test(sample)) return "percent";
+      if (/age/i.test(metricLabel)) return "float1";
+      const n = toNumber(sample);
+      if (Number.isFinite(n) && !Number.isInteger(n) && Math.abs(n) < 150) return "float1";
+      return "int";
+    }
+
+    function prettifyMetricLabel(metricKey) {
+      const metricNameMap = {
+        "Total population": "Population",
+        "Median age (years)": "Median Age",
+        "Median household income (dollars)": "Median Income",
+        "No health insurance coverage": "No Insurance",
+        "65 years and over": "65+ Population"
+      };
+      return metricNameMap[metricKey] || metricKey;
+    }
+
+    function getModeLabel() {
+      return state.groupLabelByKey[state.mode] || state.mode;
+    }
+
+    function getWheelMetricKey() {
+      const primary = state.metrics.find((m) => m.key === POPULATION_METRIC_KEY);
+      return primary ? primary.key : (state.metrics[0]?.key || POPULATION_METRIC_KEY);
+    }
+
     function formatValue(type, value) {
       if (!Number.isFinite(value)) return "-";
       if (type === "currency") return "$" + Math.round(value).toLocaleString();
@@ -635,28 +685,43 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     function buildData(rows) {
       const headers = rows[0] || [];
       const map = {};
+      const groupLabelsByKey = {};
       for (let c = 1; c < headers.length; c += 1) {
         const h = (headers[c] || "").trim();
-        const match = h.match(/^(.*?)!!(Total population|Asian alone)!!Estimate$/);
+        const match = h.match(/^(.*?)!!(.+?)!!Estimate$/);
         if (!match) continue;
         const st = match[1].trim();
-        const group = match[2] === "Asian alone" ? "asian" : "total";
+        const groupLabel = match[2].trim();
+        const group = toGroupKey(groupLabel);
         map[c] = { st, group };
+        groupLabelsByKey[group] = groupLabel;
       }
 
       const byState = {};
+      const metricSamples = {};
       rows.slice(1).forEach((r) => {
         const metric = normalizeLabel(r[0] || "");
+        if (!metric) return;
         Object.entries(map).forEach(([idx, info]) => {
           const i = Number(idx);
           const raw = (r[i] || "").trim();
           if (!byState[info.st]) byState[info.st] = {};
           if (!byState[info.st][metric]) byState[info.st][metric] = {};
           byState[info.st][metric][info.group] = toNumber(raw);
+          if (raw && !metricSamples[metric]) metricSamples[metric] = raw;
         });
       });
 
-      return byState;
+      const groups = Object.entries(groupLabelsByKey)
+        .map(([key, label]) => ({ key, label }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+      const metrics = Object.keys(metricSamples).map((metricKey) => ({
+        key: metricKey,
+        label: prettifyMetricLabel(metricKey),
+        type: inferMetricType(metricKey, metricSamples[metricKey])
+      }));
+
+      return { byState, groups, groupLabelsByKey, metrics };
     }
 
     function createArcPath(cx, cy, r0, r1, a0, a1) {
@@ -677,7 +742,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     }
 
     function modeCenterColor() {
-      return state.mode === "asian" ? "#ffd972" : "#6fe6ff";
+      return /asian/i.test(getModeLabel()) ? "#ffd972" : "#6fe6ff";
     }
 
     function updateCenterTexts() {
@@ -685,10 +750,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       const centerHover = document.getElementById("centerHover");
       const centerMeta = document.getElementById("centerMeta");
       if (!centerUS || !centerHover || !centerMeta) return;
-      const usTotal = state.dataByState["United States"]?.["Total population"]?.total;
+      const wheelMetric = getWheelMetricKey();
+      const usTotal = state.dataByState["United States"]?.[wheelMetric]?.[state.mode];
       centerUS.textContent = formatValue("int", usTotal);
       centerHover.textContent = state.hoveredState || "";
-      const selectedVal = state.dataByState[state.selectedState]?.["Total population"]?.[state.mode];
+      const selectedVal = state.dataByState[state.selectedState]?.[wheelMetric]?.[state.mode];
       centerMeta.textContent = `${state.selectedState} · ${formatCompact("int", selectedVal)}`;
     }
 
@@ -711,10 +777,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     }
 
     function updateScaleLegend() {
-      const left = state.mode === "asian"
+      const isAsianFamily = /asian/i.test(getModeLabel());
+      const left = isAsianFamily
         ? "rgba(98, 74, 16, 0.95)"
         : "rgba(29, 95, 130, 0.9)";
-      const right = state.mode === "asian"
+      const right = isAsianFamily
         ? "rgba(255, 215, 114, 0.96)"
         : "rgba(120, 230, 255, 0.95)";
       el.scaleBar.style.background = `linear-gradient(90deg, ${left}, ${right})`;
@@ -771,7 +838,8 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     }
 
     function renderWheel() {
-      const modeLabel = state.mode === "asian" ? "Asian" : "Total";
+      const modeLabel = getModeLabel();
+      const wheelMetric = getWheelMetricKey();
       el.modeText.textContent = modeLabel;
       el.wheelTitle.textContent = `ALL STATES / Equal Width (${modeLabel})`;
 
@@ -779,7 +847,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
         .filter((s) => s !== "United States")
         .map((s) => ({
           name: s,
-          value: state.dataByState[s]?.["Total population"]?.[state.mode] || 0
+          value: state.dataByState[s]?.[wheelMetric]?.[state.mode] || 0
         }))
         .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -817,7 +885,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
         const path = document.createElementNS(ns, "path");
         path.setAttribute("d", createArcPath(cx, cy, inner, outer, arcStart, arcEnd));
         const p = (d.value - minValue) / spread;
-        const hue = state.mode === "asian" ? 44 : 194;
+        const hue = /asian/i.test(modeLabel) ? 44 : 194;
         const sat = 58 + p * 36;
         const light = 28 + p * 30;
         const alpha = 0.2 + p * 0.65;
@@ -920,7 +988,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       centerV.setAttribute("text-anchor", "middle");
       centerV.setAttribute("letter-spacing", "0.8");
       centerV.setAttribute("id", "centerUS");
-      const usTotal = state.dataByState["United States"]?.["Total population"]?.total;
+      const usTotal = state.dataByState["United States"]?.[wheelMetric]?.[state.mode];
       centerV.textContent = formatValue("int", usTotal);
       svg.appendChild(centerV);
 
@@ -942,7 +1010,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       centerMeta.setAttribute("font-size", "11");
       centerMeta.setAttribute("text-anchor", "middle");
       centerMeta.setAttribute("id", "centerMeta");
-      const selectedVal = state.dataByState[state.selectedState]?.["Total population"]?.[state.mode];
+      const selectedVal = state.dataByState[state.selectedState]?.[wheelMetric]?.[state.mode];
       centerMeta.textContent = `${state.selectedState} · ${formatCompact("int", selectedVal)}`;
       svg.appendChild(centerMeta);
 
@@ -972,8 +1040,9 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       const svg = el.mapSvg;
       const ns = "http://www.w3.org/2000/svg";
       svg.innerHTML = "";
+      const wheelMetric = getWheelMetricKey();
       const states = state.states.filter((s) => s !== "United States");
-      const values = states.map((s) => state.dataByState[s]?.["Total population"]?.[state.mode] || 0);
+      const values = states.map((s) => state.dataByState[s]?.[wheelMetric]?.[state.mode] || 0);
       const minValue = Math.min(...values);
       const maxValue = Math.max(...values);
       const spread = Math.max(1, maxValue - minValue);
@@ -1001,11 +1070,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
               const name = FIPS_TO_STATE[fips];
               if (!name || !state.dataByState[name]) return;
 
-              const value = state.dataByState[name]?.["Total population"]?.[state.mode] || 0;
+              const value = state.dataByState[name]?.[wheelMetric]?.[state.mode] || 0;
               const p = (value - minValue) / spread;
               const isActive = name === state.selectedState;
               const isAlabama = name === "Alabama";
-              const hue = state.mode === "asian" ? 44 : 194;
+              const hue = /asian/i.test(getModeLabel()) ? 44 : 194;
               const sat = 56 + p * 34;
               const light = 26 + p * 34;
 
@@ -1090,11 +1159,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
         if (!pos) return;
         const x = originX + pos[0] * (tileW + gap);
         const y = originY + pos[1] * (tileH + gap);
-        const value = state.dataByState[name]?.["Total population"]?.[state.mode] || 0;
+        const value = state.dataByState[name]?.[wheelMetric]?.[state.mode] || 0;
         const p = (value - minValue) / spread;
         const isActive = name === state.selectedState;
         const isAlabama = name === "Alabama";
-        const hue = state.mode === "asian" ? 44 : 194;
+        const hue = /asian/i.test(getModeLabel()) ? 44 : 194;
         const sat = 56 + p * 34;
         const light = 26 + p * 34;
 
@@ -1177,7 +1246,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       if (isWheel) {
         renderWheel();
       } else {
-        el.wheelTitle.textContent = `US STATE MAP / Data Linked (${state.mode === "asian" ? "Asian" : "Total"})`;
+        el.wheelTitle.textContent = `US STATE MAP / Data Linked (${getModeLabel()})`;
         renderMap();
       }
       requestAnimationFrame(() => {
@@ -1208,7 +1277,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       const st = state.selectedState;
       const row = state.dataByState[st] || {};
 
-      const cards = METRICS.map((m) => {
+      const cards = state.metrics.map((m) => {
         const value = row[m.key]?.[state.mode];
         const us = state.dataByState["United States"]?.[m.key]?.[state.mode];
         return { ...m, value, delta: Number.isFinite(value) && Number.isFinite(us) ? value - us : NaN };
@@ -1250,7 +1319,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     function renderUSStats() {
       const usRow = state.dataByState["United States"] || {};
       el.usStats.innerHTML = "";
-      METRICS.forEach((m) => {
+      state.metrics.forEach((m) => {
         const value = usRow[m.key]?.[state.mode];
         const card = document.createElement("div");
         card.className = "card us-card";
@@ -1277,10 +1346,25 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     }
 
     function updateToggleUI() {
-      const toAsian = state.mode === "asian";
-      el.pill.style.transform = toAsian ? "translateX(100%)" : "translateX(0)";
-      [...el.toggle.querySelectorAll("button")].forEach((btn) => {
+      const buttons = [...el.toggle.querySelectorAll("button")];
+      const activeIdx = Math.max(0, buttons.findIndex((btn) => btn.dataset.group === state.mode));
+      el.toggle.style.setProperty("--pill-index", String(activeIdx));
+      buttons.forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.group === state.mode);
+      });
+    }
+
+    function renderGroupToggle() {
+      el.toggle.innerHTML = '<span class="pill" id="pill"></span>';
+      el.pill = el.toggle.querySelector("#pill");
+      const groups = state.groups.length ? state.groups : [{ key: "total_population", label: "Total population" }];
+      el.toggle.style.setProperty("--segments", String(groups.length));
+      groups.forEach((group) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.group = group.key;
+        button.textContent = group.label.replace(/\s+alone$/i, "");
+        el.toggle.appendChild(button);
       });
     }
 
@@ -1309,14 +1393,22 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       }
 
       const built = buildData(rows);
-      const builtStates = Object.keys(built);
+      const builtStates = Object.keys(built.byState);
       if (!builtStates.length) {
         throw new Error("CSV does not include state columns in the expected format.");
       }
 
-      state.dataByState = built;
+      state.dataByState = built.byState;
       state.states = builtStates;
+      state.groups = built.groups.length ? built.groups : state.groups;
+      state.groupLabelByKey = Object.keys(built.groupLabelsByKey).length ? built.groupLabelsByKey : state.groupLabelByKey;
+      state.metrics = built.metrics.length ? built.metrics : DEFAULT_METRICS;
+      if (!state.groups.some((g) => g.key === state.mode)) {
+        const preferred = state.groups.find((g) => g.key === "total_population") || state.groups[0];
+        state.mode = preferred.key;
+      }
       state.csvSourceLabel = sourceLabel;
+      renderGroupToggle();
       renderStateOptions();
       updateToggleUI();
       updateViewToggleUI();
@@ -1388,6 +1480,7 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       } catch (e) {
         state.usGeoFeatures = null;
       }
+      renderGroupToggle();
       bindEvents();
       applyCsvText(text, state.csvSourceLabel);
     }
