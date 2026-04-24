@@ -146,6 +146,42 @@
       min-height: 620px;
     }
 
+    .data-loader {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 18px;
+      border-bottom: 1px solid rgba(114, 206, 255, 0.2);
+      background: rgba(8, 20, 34, 0.48);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .data-loader input[type="file"] {
+      color: var(--text);
+      max-width: 100%;
+    }
+
+    .data-loader .status {
+      color: #9be8ff;
+      letter-spacing: 0.02em;
+    }
+
+    .data-loader button {
+      border: 1px solid rgba(114, 206, 255, 0.35);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      color: var(--text);
+      background: rgba(6, 18, 34, 0.68);
+      cursor: pointer;
+    }
+
+    .data-loader button:hover {
+      border-color: rgba(150, 230, 255, 0.75);
+    }
+
     .panel {
       border: 1px solid var(--glass-border);
       border-radius: 18px;
@@ -396,6 +432,13 @@
       </div>
     </header>
 
+    <section class="data-loader">
+      <strong>Data File:</strong>
+      <input id="csvUpload" type="file" accept=".csv,text/csv" />
+      <button id="clearUploadedCsv" type="button">Use default CSV</button>
+      <span class="status" id="uploadStatus">Loaded: wheel data.csv</span>
+    </section>
+
     <section class="content">
       <article class="panel wheel-wrap">
         <div class="wheel-meta">
@@ -417,7 +460,7 @@
         <div class="stats" id="stats"></div>
 
         <div class="legend">
-          <div><span class="dot"></span><strong>Source:</strong> `wheel data.csv` (local)</div>
+          <div><span class="dot"></span><strong>Source:</strong> <span id="csvSource">wheel data.csv (local)</span></div>
           <div><strong>Mode:</strong> <span id="modeText">Total</span></div>
           <div><strong>Note:</strong> 우측 숫자는 토글 전환 시 애니메이션으로 갱신됩니다.</div>
           <div class="scale-legend">
@@ -433,6 +476,9 @@
   <script src="https://unpkg.com/d3-geo@3"></script>
   <script src="https://unpkg.com/topojson-client@3"></script>
   <script>
+    const UPLOADED_CSV_TEXT_KEY = "censusDatawheel.uploadedCsvText";
+    const UPLOADED_CSV_NAME_KEY = "censusDatawheel.uploadedCsvName";
+
     const METRICS = [
       { key: "Total population", label: "Population", type: "int" },
       { key: "Median age (years)", label: "Median Age", type: "float1" },
@@ -502,7 +548,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       stateSelect: document.getElementById("stateSelect"),
       usStats: document.getElementById("usStats"),
       stats: document.getElementById("stats"),
-      modeText: document.getElementById("modeText")
+      modeText: document.getElementById("modeText"),
+      csvUpload: document.getElementById("csvUpload"),
+      clearUploadedCsv: document.getElementById("clearUploadedCsv"),
+      uploadStatus: document.getElementById("uploadStatus"),
+      csvSource: document.getElementById("csvSource")
     };
 
     const state = {
@@ -513,7 +563,8 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       wheelRotation: 0,
       hoveredState: null,
       view: "wheel",
-      usGeoFeatures: null
+      usGeoFeatures: null,
+      csvSourceLabel: "wheel data.csv (local)"
     };
 
     function parseCSV(text) {
@@ -667,6 +718,11 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
         ? "rgba(255, 215, 114, 0.96)"
         : "rgba(120, 230, 255, 0.95)";
       el.scaleBar.style.background = `linear-gradient(90deg, ${left}, ${right})`;
+    }
+
+    function updateCsvUI() {
+      el.csvSource.textContent = state.csvSourceLabel;
+      el.uploadStatus.textContent = `Loaded: ${state.csvSourceLabel}`;
     }
 
     function showMapTooltip(name, value, evt) {
@@ -1229,13 +1285,47 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
     }
 
     async function loadCsvText() {
+      const storedCsv = localStorage.getItem(UPLOADED_CSV_TEXT_KEY);
+      const storedName = localStorage.getItem(UPLOADED_CSV_NAME_KEY);
+      if (storedCsv) {
+        state.csvSourceLabel = storedName || "uploaded.csv";
+        return storedCsv;
+      }
       try {
         const res = await fetch("./wheel data.csv");
         if (!res.ok) throw new Error("fetch failed");
+        state.csvSourceLabel = "wheel data.csv (local)";
         return await res.text();
       } catch (e) {
+        state.csvSourceLabel = "Built-in fallback CSV";
         return fallbackCsv;
       }
+    }
+
+    function applyCsvText(text, sourceLabel) {
+      const rows = parseCSV(text);
+      if (!rows.length || (rows[0] || []).length < 2) {
+        throw new Error("CSV format is invalid.");
+      }
+
+      const built = buildData(rows);
+      const builtStates = Object.keys(built);
+      if (!builtStates.length) {
+        throw new Error("CSV does not include state columns in the expected format.");
+      }
+
+      state.dataByState = built;
+      state.states = builtStates;
+      state.csvSourceLabel = sourceLabel;
+      renderStateOptions();
+      updateToggleUI();
+      updateViewToggleUI();
+      updateScaleLegend();
+      if (state.states.includes("Alabama")) state.selectedState = "Alabama";
+      renderActiveView();
+      renderUSStats();
+      renderDetail();
+      updateCsvUI();
     }
 
     function bindEvents() {
@@ -1261,13 +1351,31 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       el.stateSelect.addEventListener("change", () => {
         selectState(el.stateSelect.value, true);
       });
+
+      el.csvUpload.addEventListener("change", async (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          localStorage.setItem(UPLOADED_CSV_TEXT_KEY, text);
+          localStorage.setItem(UPLOADED_CSV_NAME_KEY, file.name);
+          applyCsvText(text, `${file.name} (uploaded)`);
+        } catch (err) {
+          el.uploadStatus.textContent = "Upload failed. Please use a valid CSV with the same format.";
+        }
+      });
+
+      el.clearUploadedCsv.addEventListener("click", async () => {
+        localStorage.removeItem(UPLOADED_CSV_TEXT_KEY);
+        localStorage.removeItem(UPLOADED_CSV_NAME_KEY);
+        if (el.csvUpload) el.csvUpload.value = "";
+        const text = await loadCsvText();
+        applyCsvText(text, state.csvSourceLabel);
+      });
     }
 
     async function init() {
       const text = await loadCsvText();
-      const rows = parseCSV(text);
-      state.dataByState = buildData(rows);
-      state.states = Object.keys(state.dataByState);
       try {
         if (window.d3 && window.topojson) {
           const res = await fetch("https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json");
@@ -1280,16 +1388,8 @@ No health insurance coverage,8%,5%,8%,8%,11%,10%,5%,9%,6%,3%,8%,7%,6%,5%,7%,5%,1
       } catch (e) {
         state.usGeoFeatures = null;
       }
-      renderStateOptions();
       bindEvents();
-      updateToggleUI();
-      updateViewToggleUI();
-      updateScaleLegend();
-      // Ensure AL is the default reference panel on first load.
-      if (state.states.includes("Alabama")) state.selectedState = "Alabama";
-      renderActiveView();
-      renderUSStats();
-      renderDetail();
+      applyCsvText(text, state.csvSourceLabel);
     }
 
     init();
